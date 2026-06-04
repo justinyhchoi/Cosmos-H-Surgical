@@ -167,7 +167,11 @@ def attention(
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        with sdpa_kernel_(backends=SDPA_BACKENDS):
+
+
+        with sdpa_kernel_(SDPBackend.MATH):
+            # print(f"Running attention with {sdpa_kernel_.current_backend()} backend.")
+            # print(f"Settings")
             out = torch.nn.functional.scaled_dot_product_attention(
                 q,
                 k,
@@ -176,6 +180,5 @@ def attention(
                 dropout_p=dropout_p,
                 scale=softmax_scale,
             )
-
         out = out.transpose(1, 2).contiguous()
         return out

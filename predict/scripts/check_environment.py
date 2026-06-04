@@ -19,6 +19,11 @@ from argparse import ArgumentParser
 
 parser = ArgumentParser()
 parser.add_argument("--training", action="store_true", help="Check training packages")
+parser.add_argument(
+    "--allow-missing-accelerators",
+    action="store_true",
+    help="Allow missing accelerator packages (flash-attn/transformer_engine/natten) for pre-Ampere compatibility.",
+)
 args = parser.parse_args()
 
 
@@ -62,7 +67,20 @@ def _flash_attn_is_ok():
     return True
 
 
-def check_packages(package_list, success_status=True):
+def _is_pre_ampere_gpu() -> bool:
+    try:
+        import torch
+    except ImportError:
+        return False
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability(torch.cuda.current_device())
+    return major < 8
+
+
+def check_packages(package_list, success_status=True, optional_packages=None, require_flash_attn=True):
+    optional_packages = optional_packages or set()
+
     def print_success(package, version=None):
         if version:
             print(f"\033[92m[SUCCESS]\033[0m {package} found (v{version})")
@@ -72,7 +90,12 @@ def check_packages(package_list, success_status=True):
     def print_error(message):
         print(f"\033[91m[ERROR]\033[0m {message}")
 
+    def print_warning(message):
+        print(f"\033[93m[WARNING]\033[0m {message}")
+
     for package in package_list:
+        package_key = package if isinstance(package, str) else tuple(package)
+        is_optional = package_key in optional_packages
         if isinstance(package, tuple):
             found = False
             for alt_package in package:
@@ -85,8 +108,12 @@ def check_packages(package_list, success_status=True):
                 except ImportError:
                     continue
             if not found:
-                print_error(f"None of the alternative packages found: \033[93m{', '.join(package)}\033[0m")
-                success_status = False
+                message = f"None of the alternative packages found: \033[93m{', '.join(package)}\033[0m"
+                if is_optional:
+                    print_warning(message)
+                else:
+                    print_error(message)
+                    success_status = False
         elif package == "apex":
             try:
                 module = importlib.import_module(package)
@@ -97,11 +124,17 @@ def check_packages(package_list, success_status=True):
 
                     print_success("apex.multi_tensor_apply")
                 except ImportError:
-                    print_error("apex.multi_tensor_apply not found")
-                    success_status = False
+                    if is_optional:
+                        print_warning("apex.multi_tensor_apply not found")
+                    else:
+                        print_error("apex.multi_tensor_apply not found")
+                        success_status = False
             except ImportError:
-                print_error("apex not found")
-                success_status = False
+                if is_optional:
+                    print_warning("apex not found")
+                else:
+                    print_error("apex not found")
+                    success_status = False
         elif package == "transformer_engine":
             try:
                 module = importlib.import_module(package)
@@ -112,25 +145,41 @@ def check_packages(package_list, success_status=True):
 
                     print_success("transformer_engine.pytorch")
                 except ImportError:
-                    print_error("transformer_engine.pytorch not found")
-                    success_status = False
+                    if is_optional:
+                        print_warning("transformer_engine.pytorch not found")
+                    else:
+                        print_error("transformer_engine.pytorch not found")
+                        success_status = False
             except ImportError:
-                print_error("transformer_engine not found")
-                success_status = False
+                if is_optional:
+                    print_warning("transformer_engine not found")
+                else:
+                    print_error("transformer_engine not found")
+                    success_status = False
         else:
             try:
                 module = importlib.import_module(package)
                 version = getattr(module, "__version__", None)
                 print_success(package, version)
-            except ImportError as e:
-                print_error(f"Package not successfully imported: \033[93m{package}\033[0m")
-                success_status = False
+            except ImportError:
+                message = f"Package not successfully imported: \033[93m{package}\033[0m"
+                if is_optional:
+                    print_warning(message)
+                else:
+                    print_error(message)
+                    success_status = False
 
-    if _flash_attn_is_ok():
-        print(f"\033[92m[SUCCESS]\033[0m flash_attn_func succeeds")
+    if require_flash_attn:
+        if _flash_attn_is_ok():
+            print(f"\033[92m[SUCCESS]\033[0m flash_attn_func succeeds")
+        else:
+            print(f"\033[91m[ERROR]\033[0m flash_attn_func fails")
+            success_status = False
     else:
-        print(f"\033[91m[ERROR]\033[0m flash_attn_func fails")
-        success_status = False
+        if _flash_attn_is_ok():
+            print(f"\033[92m[SUCCESS]\033[0m flash_attn_func succeeds")
+        else:
+            print("\033[93m[WARNING]\033[0m flash_attn_func fails (allowed in compatibility mode)")
 
     return success_status
 
@@ -156,7 +205,21 @@ packages_training = [
     "apex",
 ]
 
-all_success = check_packages(packages)
+compat_mode = args.allow_missing_accelerators or _is_pre_ampere_gpu()
+optional_packages = set()
+if compat_mode:
+    print("\033[93m[WARNING]\033[0m Accelerator compatibility mode enabled; transformer_engine/flash_attn/natten are optional.")
+    optional_packages = {
+        "transformer_engine",
+        "natten",
+        ("flash_attn", "flash_attn_interface"),
+    }
+
+all_success = check_packages(
+    packages,
+    optional_packages=optional_packages,
+    require_flash_attn=not compat_mode,
+)
 if args.training:
     training_success = check_packages(packages_training)
     if not training_success:

@@ -15,6 +15,7 @@
 
 import collections
 import math
+import warnings
 from collections import namedtuple
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -33,7 +34,15 @@ except ImportError:
 import numpy as np
 import torch
 import torch.amp as amp
-import transformer_engine as te
+
+try:
+    import transformer_engine as te
+
+    TRANSFORMER_ENGINE_AVAILABLE = True
+except ImportError:
+    te = None
+    TRANSFORMER_ENGINE_AVAILABLE = False
+
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from torch import nn
@@ -48,10 +57,26 @@ except ImportError:
 
 from torchvision import transforms
 
-try:
-    from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
-except ImportError:
-    from transformer_engine.pytorch.attention import apply_rotary_pos_emb
+if TRANSFORMER_ENGINE_AVAILABLE:
+    try:
+        from transformer_engine.pytorch.attention.rope import apply_rotary_pos_emb
+    except ImportError:
+        from transformer_engine.pytorch.attention import apply_rotary_pos_emb
+else:
+
+    _ROTARY_FALLBACK_WARNED = False
+
+    def apply_rotary_pos_emb(tensor, *args, **kwargs):
+        global _ROTARY_FALLBACK_WARNED
+        if not _ROTARY_FALLBACK_WARNED:
+            warnings.warn(
+                "transformer_engine is unavailable; disabling fused RoPE in minimal_v4_dit fallback mode.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            _ROTARY_FALLBACK_WARNED = True
+        return tensor
+
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
 from cosmos_predict2._src.imaginaire.attention import attention
@@ -231,6 +256,19 @@ class RMSNorm(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
+
+
+def _build_rms_norm(dim: int, eps: float = 1e-6) -> nn.Module:
+    if TRANSFORMER_ENGINE_AVAILABLE:
+        return te.pytorch.RMSNorm(dim, eps=eps)
+    return RMSNorm(dim, eps=eps)
+
+
+def _is_pre_ampere_gpu() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability(torch.cuda.current_device())
+    return major < 8
 
 
 # ---------------------- Feed Forward Network -----------------------
@@ -439,6 +477,13 @@ class Attention(nn.Module):
             f"Invalid backend: {backend}"
         )
         self.backend = backend
+        if self.backend == "transformer_engine":
+            if not TRANSFORMER_ENGINE_AVAILABLE:
+                log.warning("transformer_engine unavailable; falling back to backend='torch'.")
+                self.backend = "torch"
+            elif _is_pre_ampere_gpu():
+                log.warning("Pre-Ampere GPU detected; falling back from backend='transformer_engine' to backend='torch'.")
+                self.backend = "torch"
 
         context_dim = query_dim if context_dim is None else context_dim
         inner_dim = head_dim * n_heads
@@ -451,10 +496,10 @@ class Attention(nn.Module):
         self.use_wan_fp32_strategy = use_wan_fp32_strategy
 
         self.q_proj = nn.Linear(query_dim, inner_dim, bias=False)
-        self.q_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        self.q_norm = _build_rms_norm(self.head_dim, eps=1e-6)
 
         self.k_proj = nn.Linear(context_dim, inner_dim, bias=False)
-        self.k_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        self.k_norm = _build_rms_norm(self.head_dim, eps=1e-6)
 
         self.v_proj = nn.Linear(context_dim, inner_dim, bias=False)
         self.v_norm = nn.Identity()
@@ -585,7 +630,7 @@ class I2VCrossAttention(Attention):
         inner_dim = self.head_dim * self.n_heads
         self.k_img = nn.Linear(img_latent_dim, inner_dim, bias=False)
         self.v_img = nn.Linear(img_latent_dim, inner_dim, bias=False)
-        self.k_img_norm = te.pytorch.RMSNorm(self.head_dim, eps=1e-6)
+        self.k_img_norm = _build_rms_norm(self.head_dim, eps=1e-6)
 
     def init_weights(self) -> None:
         super().init_weights()
@@ -1553,7 +1598,7 @@ class MiniTrainDIT(WeightTrainingStat):
             use_wan_fp32_strategy=self.use_wan_fp32_strategy,
         )
 
-        self.t_embedding_norm = te.pytorch.RMSNorm(model_channels, eps=1e-6)
+        self.t_embedding_norm = _build_rms_norm(model_channels, eps=1e-6)
         if extra_image_context_dim is not None:
             self.img_context_proj = nn.Sequential(
                 nn.Linear(

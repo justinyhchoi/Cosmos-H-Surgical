@@ -49,8 +49,10 @@ from transformers.utils import (
     logging,
 )
 
+FLASH_ATTN2_AVAILABLE = is_flash_attn_2_available()
+
 # upgrade to 2.7.4 also works
-if is_flash_attn_2_available():
+if FLASH_ATTN2_AVAILABLE:
     from flash_attn import flash_attn_varlen_func
     from flash_attn.layers.rotary import apply_rotary_emb
 
@@ -59,13 +61,12 @@ else:
     apply_rotary_emb = None
 
 
-if is_flash_attn_2_available():
+if FLASH_ATTN2_AVAILABLE:
     from transformers.modeling_flash_attention_utils import _flash_attention_forward
 else:
     print("flash_attn_2 not available")
     flash_attn_varlen_func = None
-
-assert is_flash_attn_2_available(), "flash_attn_2 not available. run pip install flash_attn"
+    _flash_attention_forward = None
 
 logger = logging.get_logger(__name__)
 
@@ -252,6 +253,8 @@ class Qwen2_5_VLPatchMerger(nn.Module):
 
 
 def apply_rotary_pos_emb_flashatt(tensor: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+    if apply_rotary_emb is None:
+        return apply_rotary_pos_emb_vision(tensor, freqs)
     tensor_ = tensor.float()
     cos = freqs.cos().float()
     sin = freqs.sin().float()
@@ -384,6 +387,9 @@ QWEN2_5_VL_VISION_ATTENTION_CLASSES = {
 class Qwen2_5_VLVisionBlock(nn.Module):
     def __init__(self, config, attn_implementation: str = "sdpa") -> None:
         super().__init__()
+        if attn_implementation == "flash_attention_2" and not FLASH_ATTN2_AVAILABLE:
+            logger.warning_once("flash_attention_2 unavailable; falling back to sdpa attention for Qwen2.5-VL vision block.")
+            attn_implementation = "sdpa"
         self.norm1 = Qwen2RMSNorm(config.hidden_size, eps=1e-6)
         self.norm2 = Qwen2RMSNorm(config.hidden_size, eps=1e-6)
         self.attn = QWEN2_5_VL_VISION_ATTENTION_CLASSES[attn_implementation](
@@ -1059,6 +1065,10 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
     def __init__(self, config: Qwen2_5_VLConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
+
+        if config._attn_implementation == "flash_attention_2" and not FLASH_ATTN2_AVAILABLE:
+            logger.warning_once("flash_attention_2 unavailable; falling back to sdpa attention for Qwen2.5-VL decoder.")
+            config._attn_implementation = "sdpa"
 
         if config.use_sliding_window and config._attn_implementation != "flash_attention_2":
             logger.warning_once(

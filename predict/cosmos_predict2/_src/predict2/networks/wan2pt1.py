@@ -37,7 +37,14 @@ from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper as ptd_checkpoint_wrapper
 from torch.nn.modules.module import _IncompatibleKeys
 from torchvision import transforms
-from transformer_engine.pytorch.attention import DotProductAttention
+
+try:
+    from transformer_engine.pytorch.attention import DotProductAttention
+
+    TRANSFORMER_ENGINE_AVAILABLE = True
+except ImportError:
+    DotProductAttention = None
+    TRANSFORMER_ENGINE_AVAILABLE = False
 
 from cosmos_predict2._src.imaginaire.utils import log
 from cosmos_predict2._src.imaginaire.utils.context_parallel import split_inputs_cp
@@ -237,8 +244,19 @@ def rope_apply(x, video_size: VideoSize, freqs):
     cos = torch.cos(freqs).to(torch.float32)
     sin = torch.sin(freqs).to(torch.float32)
 
-    # Apply the rotation
-    rotated = flash_apply_rotary_emb(x.to(torch.float32), cos, sin, interleaved=True, inplace=False)
+    # Apply the rotation. If flash-attn is unavailable, use a torch fallback.
+    if flash_apply_rotary_emb is not None:
+        rotated = flash_apply_rotary_emb(x.to(torch.float32), cos, sin, interleaved=True, inplace=False)
+    else:
+        x_f32 = x.to(torch.float32)
+        x_even = x_f32[..., 0::2]
+        x_odd = x_f32[..., 1::2]
+
+        cos = cos.unsqueeze(0).unsqueeze(2)
+        sin = sin.unsqueeze(0).unsqueeze(2)
+        out_even = x_even * cos - x_odd * sin
+        out_odd = x_even * sin + x_odd * cos
+        rotated = torch.stack((out_even, out_odd), dim=-1).flatten(-2)
 
     return rotated.to(x.dtype)
 
@@ -277,7 +295,20 @@ class WanLayerNorm(nn.LayerNorm):
         return super().forward(x)
 
 
-class SelfAttnOp(DotProductAttention):
+def _is_pre_ampere_gpu() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability(torch.cuda.current_device())
+    return major < 8
+
+
+class SelfAttnOp(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        if DotProductAttention is None:
+            raise RuntimeError("transformer_engine is required for transformer_engine attention backend")
+        self._op = DotProductAttention(*args, **kwargs)
+
     def forward(
         self,
         q_B_L_H_D,
@@ -285,7 +316,10 @@ class SelfAttnOp(DotProductAttention):
         v_B_L_H_D,
         video_size: Optional[VideoSize] = None,
     ):
-        return super().forward(q_B_L_H_D, k_B_L_H_D, v_B_L_H_D)
+        return self._op(q_B_L_H_D, k_B_L_H_D, v_B_L_H_D)
+
+    def set_context_parallel_group(self, *args, **kwargs):
+        return self._op.set_context_parallel_group(*args, **kwargs)
 
 
 class WanSelfAttention(nn.Module):
@@ -310,6 +344,13 @@ class WanSelfAttention(nn.Module):
         self.qk_norm = qk_norm
         self.cp_comm_type = cp_comm_type
         self.attention_backend = attention_backend
+        if self.attention_backend == "transformer_engine":
+            if not TRANSFORMER_ENGINE_AVAILABLE:
+                log.warning("transformer_engine unavailable in WanModel; falling back to attention_backend='minimal_a2a'.")
+                self.attention_backend = "minimal_a2a"
+            elif _is_pre_ampere_gpu():
+                log.warning("Pre-Ampere GPU detected in WanModel; falling back to attention_backend='minimal_a2a'.")
+                self.attention_backend = "minimal_a2a"
 
         # layers
         self.q = nn.Linear(dim, dim)
