@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import amp_C
 import torch
-import transformer_engine as te
-import transformer_engine_torch as tex
+from apex.multi_tensor_apply import multi_tensor_applier
 from torch.distributed._functional_collectives import AsyncCollectiveTensor
 from torch.distributed._tensor.api import DTensor
 
@@ -127,9 +127,9 @@ class FusedAdam(torch.optim.Optimizer):
 
         # Skip buffer
         self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device="cuda")
-        self.multi_tensor_adam = tex.multi_tensor_adam
-        self.multi_tensor_adam_capturable = tex.multi_tensor_adam_capturable
-        self.multi_tensor_adam_capturable_master = tex.multi_tensor_adam_capturable_master
+        self.multi_tensor_adam = amp_C.multi_tensor_adam
+        self.multi_tensor_adam_capturable = amp_C.multi_tensor_adam_capturable
+        self.multi_tensor_adam_capturable_master = amp_C.multi_tensor_adam_capturable_master
 
     def step(self, closure=None, grads=None, output_params=None, scale=None, grad_norms=None, grad_scaler=None):
         """Performs a single optimization step.
@@ -264,7 +264,7 @@ class FusedAdam(torch.optim.Optimizer):
                     inv_scale = torch.ones((1,), device=device, dtype=torch.float32)
 
                 if len(g_16) > 0:
-                    te.pytorch.optimizers.multi_tensor_applier(
+                    multi_tensor_applier(
                         (
                             self.multi_tensor_adam_capturable_master
                             if self.master_weights
@@ -284,7 +284,7 @@ class FusedAdam(torch.optim.Optimizer):
                     )
 
                 if len(g_bf) > 0:
-                    te.pytorch.optimizers.multi_tensor_applier(
+                    multi_tensor_applier(
                         (
                             self.multi_tensor_adam_capturable_master
                             if self.master_weights
@@ -304,7 +304,7 @@ class FusedAdam(torch.optim.Optimizer):
                     )
 
                 if len(g_32) > 0:
-                    te.pytorch.optimizers.multi_tensor_applier(
+                    multi_tensor_applier(
                         (
                             self.multi_tensor_adam_capturable_master
                             if self.master_weights
@@ -324,7 +324,7 @@ class FusedAdam(torch.optim.Optimizer):
                     )
             else:
                 if len(g_16) > 0:
-                    te.pytorch.optimizers.multi_tensor_applier(
+                    multi_tensor_applier(
                         self.multi_tensor_adam,
                         self._dummy_overflow_buf,
                         [g_16, p_16, m_16, v_16],
@@ -339,7 +339,7 @@ class FusedAdam(torch.optim.Optimizer):
                     )
 
                 if len(g_bf) > 0:
-                    te.pytorch.optimizers.multi_tensor_applier(
+                    multi_tensor_applier(
                         self.multi_tensor_adam,
                         self._dummy_overflow_buf,
                         [g_bf, p_bf, m_bf, v_bf],
@@ -354,7 +354,7 @@ class FusedAdam(torch.optim.Optimizer):
                     )
 
                 if len(g_32) > 0:
-                    te.pytorch.optimizers.multi_tensor_applier(
+                    multi_tensor_applier(
                         self.multi_tensor_adam,
                         self._dummy_overflow_buf,
                         [g_32, p_32, m_32, v_32],

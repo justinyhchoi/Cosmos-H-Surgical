@@ -18,7 +18,11 @@ import torch
 from torch import nn
 
 from cosmos_predict2._src.imaginaire.utils import log
-from cosmos_predict2._src.imaginaire.utils.fused_adam import FusedAdam
+
+try:
+    from cosmos_predict2._src.imaginaire.utils.fused_adam import FusedAdam
+except ImportError:
+    FusedAdam = None
 
 
 def get_regular_param_group(net: nn.Module):
@@ -60,6 +64,10 @@ def get_base_optimizer(
     if optim_type == "adamw":
         opt_cls = torch.optim.AdamW
     elif optim_type == "fusedadam":
+        if FusedAdam is None:
+            raise ImportError(
+                "FusedAdam requires apex (amp_C CUDA extension). Install via: pip install -v --no-cache-dir apex"
+            )
         opt_cls = FusedAdam
     else:
         raise ValueError(f"Unknown optimizer type: {optim_type}")

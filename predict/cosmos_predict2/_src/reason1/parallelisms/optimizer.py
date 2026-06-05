@@ -28,7 +28,11 @@ from torch.optim.lr_scheduler import LambdaLR
 
 from cosmos_predict2._src.imaginaire.utils import log
 from cosmos_predict2._src.reason1.configs.default.model_config import FSDP2ModelConfig
-from cosmos_predict2._src.reason1.utils.fused_adam import FusedAdam
+
+try:
+    from cosmos_predict2._src.reason1.utils.fused_adam import FusedAdam
+except ImportError:
+    FusedAdam = None
 
 
 def _optimizer_cls(params: List[nn.Parameter], optimizer_kwargs: Dict[str, Any], name: str):
@@ -37,6 +41,8 @@ def _optimizer_cls(params: List[nn.Parameter], optimizer_kwargs: Dict[str, Any],
     elif name == "AdamW":
         optimizer = torch.optim.AdamW(params, **optimizer_kwargs)
     elif name == "FusedAdam":
+        if FusedAdam is None:
+            raise ImportError("FusedAdam requires apex (amp_C CUDA extension). Install via: pip install -v --no-cache-dir apex")
         optimizer = FusedAdam(
             params,
             lr=optimizer_kwargs["lr"],

@@ -41,7 +41,10 @@ class TrainingConfig:
     context_parallel_degree: int = 1
 
     disable_loss_parallel: bool = False
-    mixed_precision_param: str = "bfloat16"
+    # Precision for mixed-precision training. Use "float16" for V100 (SM70) GPUs since
+    # bfloat16 requires Ampere (SM80+). Set use_fp16=True to enforce FP16 regardless.
+    use_fp16: bool = True
+    mixed_precision_param: str = "float16"
     mixed_precision_reduce: str = "float32"
     enable_cpu_offload: bool = False
     warmup_steps: int = 1000
@@ -276,7 +279,7 @@ class FSDP2ModelConfig:
     ckpt_path: str = None
     s3_credential_path: str = "credentials/pbss_dir.secret"
     cache_dir: str = None
-    precision: str = "bfloat16"
+    precision: str = "float16"  # Use "float16" for V100 (SM70); "bfloat16" requires Ampere (SM80+)
 
     fsdp_enabled: bool = False
     z_loss_coeff: float = 0.0  # We dont use z-loss
