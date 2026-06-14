@@ -51,6 +51,7 @@ Cosmos-H-Surgical/
 │   ├── assets/                       # Example inputs (JSON specs, control maps)
 │   ├── Dockerfile
 │   └── pyproject.toml
+├── yolov7/                           # CholecTrack20 YOLOv7 detector experiments
 ├── LICENSE                           # Apache 2.0 (source code)
 └── LICENSE.weights                   # NVIDIA-OneWay-Noncommercial-License License (weights)
 ```
@@ -91,6 +92,25 @@ python examples/inference.py -i assets/base/coagulation.json -o outputs/base_vid
 cd transfer
 python examples/inference.py -i assets/coagulation_example/depth/coagulation_depth_spec.json -o outputs/depth
 ```
+
+### CholecTrack20 YOLOv7 Detector
+
+This repository also includes an integrated YOLOv7 workspace for CholecTrack20 detector training and evaluation on `/raid/cholectrack20_yolo`.
+
+```bash
+cd yolov7
+
+# Single GPU YOLOv7 baseline
+python train.py --workers 8 --device 0 --batch-size 16 --data data/cholectrack20.yaml --img 640 640 --cfg cfg/training/yolov7.yaml --weights yolov7.pt --name cholectrack20_yolov7 --hyp data/hyp.scratch.p5.yaml
+
+# 4 GPU YOLOv7-E6E SurgiTrack-aligned launcher
+bash train_cholectrack_e6e.sh
+
+# Table 2-style validation metrics: AP50, AP75, AP50:95, per-tool AP, challenge AP
+python data/cholectrack20_table2_eval.py --weights runs/train/cholectrack20_yolov7_full/weights/best.pt --data data/cholectrack20.yaml --split val --img-size 640 --batch-size 32 --device 0 --name cholectrack20_table2_yolov7_full
+```
+
+See [yolov7/README.md](yolov7/README.md) and [yolov7/MODEL_CARD.md](yolov7/MODEL_CARD.md) for the detector-specific workflow, metrics, and limitations.
 
 ## Documentation
 

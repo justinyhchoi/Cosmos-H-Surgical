@@ -54,6 +54,14 @@ outputs/
 cache/
 imaginaire4-output/
 
+# Keep the integrated YOLOv7 source and CholecTrack20 helper configs tracked.
+!/yolov7/data/
+!/yolov7/data/cholectrack20.yaml
+!/yolov7/data/hyp.surgitrack.yaml
+!/yolov7/data/cholectrack20_eval_pipeline.sh
+!/yolov7/data/cholectrack20_table2_eval.py
+/yolov7/runs/
+
 # Ruff stuff:
 .ruff_cache/
 
@@ -76,3 +84,4 @@ imaginaire4-output/
 /outputs/
 /results/
 /tmp/
+/huggingface_cache/

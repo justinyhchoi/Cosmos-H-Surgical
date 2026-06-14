@@ -1,0 +1,14 @@
+# CholecTrack20 dataset https://github.com/CAMMA-public/cholectrack20
+
+# Dataset root
+path: /raid/cholectrack20_yolo
+
+# Only labeled frames (avoids 94% unlabeled images skewing training)
+train: /raid/cholectrack20_yolo/train.txt
+val: /raid/cholectrack20_yolo/val.txt
+
+# Number of classes
+nc: 7
+
+# Class names (matching CholecTrack20 instrument IDs 0-6)
+names: ['grasper', 'bipolar', 'hook', 'scissors', 'clipper', 'irrigator', 'specimen-bag']
