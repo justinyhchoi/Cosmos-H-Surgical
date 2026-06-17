@@ -1,14 +1,14 @@
-# CholecTrack20 YOLOv7 Detector Model Card
+# CholecTrack20 YOLOv7-X Detector Model Card
 
 ## Model Summary
 
-This model card documents the local YOLOv7 detector checkpoints trained in this workspace for CholecTrack20 surgical tool detection. The best evaluated local checkpoint at the time of writing is:
+This model card documents the local YOLOv7-X detector checkpoint trained in this workspace for CholecTrack20 surgical tool detection. The best evaluated local checkpoint at the time of writing is:
 
 ```text
-yolov7/runs/train/cholectrack20_yolov7_full/weights/best.pt
+yolov7/runs/train/cholectrack20_yolov7x_coco_854/weights/best.pt
 ```
 
-The checkpoint is a YOLOv7 detector fine-tuned from COCO-pretrained `yolov7.pt` on the converted CholecTrack20 YOLO-format dataset at `/raid/cholectrack20_yolo`.
+The checkpoint is a YOLOv7-X detector fine-tuned from the COCO-pretrained `yolov7x.pt` checkpoint on the converted CholecTrack20 YOLO-format dataset at `/raid/cholectrack20_yolo`.
 
 ## Intended Use
 
@@ -21,8 +21,11 @@ It is not intended for clinical deployment, surgical decision support, or patien
 - Dataset: CholecTrack20
 - Local raw dataset: `/raid/cholectrack20`
 - Local YOLO-format dataset: `/raid/cholectrack20_yolo`
+- Dataset config: `data/cholectrack20.yaml`
 - Classes: `grasper`, `bipolar`, `hook`, `scissors`, `clipper`, `irrigator`, `specimen-bag`
-- Local validation labels used in this evaluation: 4,106 labeled tool boxes across 2,461 labeled validation images
+- Table 2-style evaluation set used here: 13,367 images and 26,475 labeled tool boxes
+
+The YOLO-format dataset was prepared with `data/cholectrack20_prepare_v2.py`, which converts normalized CholecTrack20 top-left boxes `[x, y, w, h]` into YOLO center-format labels `[class, cx, cy, w, h]`.
 
 ## Training Recipe
 
@@ -30,74 +33,121 @@ The strongest local evaluated checkpoint uses:
 
 | Field | Value |
 | :-- | :-- |
-| Architecture | YOLOv7 |
-| Config | `cfg/training/yolov7.yaml` |
-| Initial weights | `yolov7.pt` COCO-pretrained checkpoint |
+| Architecture | YOLOv7-X |
+| Config | `cfg/training/yolov7x.yaml` |
+| Initial weights | `yolov7x.pt` COCO-pretrained checkpoint |
 | Dataset config | `data/cholectrack20.yaml` |
 | Hyperparameters | `data/hyp.scratch.p5.yaml` |
-| Image size | 640 x 640 |
-| Batch size | 16 |
-| Epochs configured | 50 |
+| Requested image size | 854 x 854 |
+| Effective training image size | 864 x 864, rounded to model stride |
+| Total batch size | 32 |
+| Per-GPU batch size | 8 |
+| Epochs configured | 100 |
 | Optimizer | SGD |
-| Device | single GPU |
+| Distributed training | 4x GPU DDP with SyncBatchNorm |
+| Run directory | `runs/train/cholectrack20_yolov7x_coco_854` |
 
-A separate YOLOv7-E6E launcher, `train_cholectrack_e6e.sh`, is provided for 4xV100 training with SurgiTrack-aligned optimizer settings where supported by this YOLOv7 codebase.
-
-## Evaluation
-
-Evaluation command:
+Training command used for the final run:
 
 ```bash
 cd yolov7
-python data/cholectrack20_table2_eval.py \
-  --weights runs/train/cholectrack20_yolov7_full/weights/best.pt \
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+NCCL_DEBUG=INFO \
+TORCH_DISTRIBUTED_DEBUG=DETAIL \
+python train_distributed.py \
+  --nproc-per-node 4 \
   --data data/cholectrack20.yaml \
-  --split val \
-  --img-size 640 \
+  --cfg cfg/training/yolov7x.yaml \
+  --weights yolov7x.pt \
+  --img-size 854 854 \
   --batch-size 32 \
-  --device 0 \
-  --name cholectrack20_table2_yolov7_full
+  --epochs 100 \
+  --name cholectrack20_yolov7x_coco_854 \
+  --hyp data/hyp.scratch.p5.yaml \
+  --workers 8 \
+  --sync-bn
 ```
 
-Generated files:
+### Key Hyperparameters
+
+| Field | Value |
+| :-- | --: |
+| `lr0` | 0.01 |
+| `lrf` | 0.1 |
+| `momentum` | 0.937 |
+| `weight_decay` | 0.0005 |
+| `warmup_epochs` | 3.0 |
+| `box` | 0.05 |
+| `cls` | 0.3 |
+| `obj` | 0.7 |
+| `mosaic` | 1.0 |
+| `mixup` | 0.15 |
+| `paste_in` | 0.15 |
+| `translate` | 0.2 |
+| `scale` | 0.9 |
+| `fliplr` | 0.5 |
+
+## Training Metrics
+
+Best training epoch by mAP50:95:
+
+| Epoch | Precision | Recall | mAP50 | mAP50:95 |
+| :-- | --: | --: | --: | --: |
+| 44/99 | 90.5 | 75.3 | 81.6 | 49.0 |
+
+Best training epoch by mAP50:
+
+| Epoch | Precision | Recall | mAP50 | mAP50:95 |
+| :-- | --: | --: | --: | --: |
+| 34/99 | 87.2 | 76.6 | 81.7 | 48.7 |
+
+Final epoch metrics:
+
+| Epoch | Precision | Recall | mAP50 | mAP50:95 |
+| :-- | --: | --: | --: | --: |
+| 99/99 | 87.8 | 77.3 | 80.8 | 48.8 |
+
+## Evaluation
+
+Table 2-style evaluation artifacts:
 
 ```text
-runs/test/cholectrack20_table2_yolov7_full/predictions.json
-runs/test/cholectrack20_table2_yolov7_full/table2_metrics.csv
-runs/test/cholectrack20_table2_yolov7_full/table2_metrics.json
+runs/test/cholectrack20_table2_yolov7x_coco_854/predictions.json
+runs/test/cholectrack20_table2_yolov7x_coco_854/table2_metrics.csv
+runs/test/cholectrack20_table2_yolov7x_coco_854/table2_metrics.json
 ```
 
-### Validation Metrics
+### Overall Metrics
 
-| Split | AP50 | AP75 | AP50:95 |
-| :-- | --: | --: | --: |
-| CholecTrack20 validation | 44.6 | 34.3 | 29.6 |
+| Split | Images | Labels | AP50 | AP75 | AP50:95 |
+| :-- | --: | --: | --: | --: | --: |
+| CholecTrack20 Table 2-style eval | 13,367 | 26,475 | 83.4 | 62.8 | 56.5 |
 
-### Per-Class AP50
+### Per-Class Metrics
 
-| Class | AP50 |
-| :-- | --: |
-| grasper | 43.6 |
-| bipolar | 50.9 |
-| hook | 48.5 |
-| scissors | 39.3 |
-| clipper | 65.6 |
-| irrigator | 4.5 |
-| specimen-bag | 59.7 |
+| Class | Labels | AP50 | AP75 | AP50:95 |
+| :-- | --: | --: | --: | --: |
+| grasper | 14,661 | 93.4 | 77.0 | 66.7 |
+| bipolar | 1,048 | 90.3 | 68.3 | 59.6 |
+| hook | 7,905 | 95.9 | 75.2 | 67.7 |
+| scissors | 202 | 88.3 | 73.1 | 64.7 |
+| clipper | 567 | 93.9 | 78.6 | 66.2 |
+| irrigator | 567 | 57.6 | 21.4 | 26.3 |
+| specimen-bag | 1,525 | 64.1 | 46.3 | 44.3 |
 
-### Visual Challenge AP50
+### Visual Challenge Metrics
 
-| Condition | AP50 |
-| :-- | --: |
-| Bleeding | 19.0 |
-| Blur | 100.0 |
-| Smoke | 44.0 |
-| Crowded | 23.5 |
-| Occluded | 51.6 |
-| Foul Lens | 13.3 |
-| Trocar | 27.0 |
-
-The blur subset contains only 2 validation images and 3 labels, so that value is not stable.
+| Condition | Images | Labels | AP50 | AP75 | AP50:95 |
+| :-- | --: | --: | --: | --: | --: |
+| Bleeding | 7,471 | 14,388 | 81.5 | 61.0 | 54.8 |
+| Blur | 127 | 218 | 65.8 | 29.0 | 33.6 |
+| Smoke | 1,537 | 3,350 | 73.4 | 54.0 | 48.9 |
+| Crowded | 3,538 | 10,950 | 82.8 | 61.3 | 54.9 |
+| Occluded | 9,234 | 22,342 | 83.3 | 62.0 | 55.9 |
+| Reflection | 34 | 52 | 64.3 | 45.7 | 40.4 |
+| Foul Lens | 615 | 1,495 | 77.0 | 55.7 | 49.6 |
+| Trocar | 334 | 682 | 53.2 | 37.8 | 35.0 |
 
 ## Comparison To Published CholecTrack20 Detector Benchmarks
 
@@ -109,16 +159,17 @@ The CholecTrack20 paper reports the following YOLO detector benchmark values in 
 | YOLOv8 | 79.1 | 62.4 | 55.6 | 29.0 |
 | YOLOv9 | 80.2 | 62.6 | 56.5 | 23.7 |
 | YOLOv10 | 80.1 | 62.1 | 55.8 | 28.6 |
+| Local YOLOv7-X | 83.4 | 62.8 | 56.5 | Not measured |
 
-The local checkpoint is far below those values and should not be described as reproducing the paper.
+The local YOLOv7-X checkpoint matches or exceeds the published AP values in this local Table 2-style evaluation, but it should not be described as an official benchmark reproduction unless the evaluation protocol, split construction, preprocessing, and reporting environment are independently verified.
 
 ## Known Gaps
 
-- The strongest local evaluated checkpoint is COCO-pretrained, while SurgiTrack states its YOLOv7 detector was pretrained on MOT20 and CrowdHuman before CholecTrack20 fine-tuning.
-- The local result is measured on validation data, not the official held-out paper test split.
-- The local YOLOv7-E6E experiment uses a different architecture scale than the 123M-parameter detector reported in SurgiTrack.
-- The provided SurgiTrack-aligned hyperparameter file does not implement the paper's Plateau learning-rate scheduler.
+- FPS was not measured for the final YOLOv7-X checkpoint.
 - The evaluation script computes Table 2-style detector metrics but is not an official CholecTrack20 benchmark submission.
+- The local evaluation depends on the converted YOLO dataset and generated COCO-style eval files in this workspace.
+- The final model uses COCO-pretrained `yolov7x.pt`, while SurgiTrack states its YOLOv7 detector was pretrained on MOT20 and CrowdHuman before CholecTrack20 fine-tuning.
+- YOLOv7-X has a larger compute and memory footprint than the earlier YOLOv7 p5 baseline.
 
 ## Licenses And Data Use
 
