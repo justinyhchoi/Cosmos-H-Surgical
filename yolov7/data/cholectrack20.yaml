@@ -6,6 +6,7 @@ path: /raid/cholectrack20_yolo
 # Only labeled frames (avoids 94% unlabeled images skewing training)
 train: /raid/cholectrack20_yolo/train.txt
 val: /raid/cholectrack20_yolo/val.txt
+test: /raid/cholectrack20_yolo/test.txt
 
 # Number of classes
 nc: 7
