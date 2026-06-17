@@ -69,6 +69,13 @@ from cosmos_predict2._src.predict2.utils.dtensor_helper import (
 IS_PREPROCESSED_KEY = "is_preprocessed"
 
 
+def _is_pre_ampere_gpu() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    major, _ = torch.cuda.get_device_capability(torch.cuda.current_device())
+    return major < 8
+
+
 @attrs.define(slots=False)
 class EMAConfig:
     """
@@ -139,11 +146,17 @@ class DiffusionModel(ImaginaireModel):
 
         self.config = config
 
+        effective_precision = config.precision
+        if effective_precision == "bfloat16" and _is_pre_ampere_gpu():
+            log.warning("Pre-Ampere GPU detected; overriding diffusion precision from bfloat16 to float16.")
+            effective_precision = "float16"
+        self.config.precision = effective_precision
+
         self.precision = {
             "float32": torch.float32,
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
-        }[config.precision]
+        }[effective_precision]
         self.tensor_kwargs = {"device": "cuda", "dtype": self.precision}
         log.warning(f"DiffusionModel: precision {self.precision}")
 

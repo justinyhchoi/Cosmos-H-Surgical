@@ -397,6 +397,7 @@ class Video2WorldInference:
         video: torch.Tensor,
         prompt: str,
         num_conditional_frames: int = 1,
+        fps: float = 16.0,
         negative_prompt: str = _DEFAULT_NEGATIVE_PROMPT,
         use_neg_prompt: bool = True,
         camera: CameraConditionInputs | None = None,
@@ -427,7 +428,7 @@ class Video2WorldInference:
             "dataset_name": "video_data",
             "video": video,
             "action": action.unsqueeze(0) if action is not None else None,
-            "fps": torch.randint(16, 32, (self.batch_size,)).float(),  # Random FPS (might be used by model)
+            "fps": torch.full((self.batch_size,), float(fps), dtype=torch.float32),
             "padding_mask": torch.zeros(self.batch_size, 1, H, W),  # Padding mask (assumed no padding here)
             "num_conditional_frames": num_conditional_frames,  # Specify number of conditional frames
         }
@@ -480,6 +481,7 @@ class Video2WorldInference:
         num_input_video: int = 1,
         num_output_video: int = 1,
         resolution: str = "192,320",
+        fps: float = 16.0,
         seed: int = 1,
         negative_prompt: str = _DEFAULT_NEGATIVE_PROMPT,
         camera: CameraConditionInputs | None = None,
@@ -524,8 +526,23 @@ class Video2WorldInference:
             video_resolution = tuple([int(x) for x in video_resolution])
             assert len(video_resolution) == 2, "Resolution must be in 'H,W' format"
 
-        # Get the correct number of frames needed by the model
+        # Get model-native frame count and reconcile with user request.
+        # In standard (non-autoregressive) mode, the model samples at a fixed native
+        # temporal size. We can trim shorter outputs but cannot exceed native size.
         model_required_frames = self.model.tokenizer.get_pixel_num_frames(self.model.config.state_t)
+        requested_video_frames = int(num_video_frames)
+        if requested_video_frames <= 0:
+            raise ValueError(f"num_video_frames must be > 0, got {requested_video_frames}")
+        if requested_video_frames > model_required_frames:
+            log.warning(
+                "Requested num_video_frames=%s exceeds model native frames=%s in standard mode; "
+                "clamping to native size. Use enable_autoregressive=True for longer outputs.",
+                requested_video_frames,
+                model_required_frames,
+            )
+            effective_video_frames = model_required_frames
+        else:
+            effective_video_frames = requested_video_frames
 
         # Determine if input is image or video and process accordingly
         if input_path is None or num_latent_conditional_frames == 0:
@@ -565,6 +582,7 @@ class Video2WorldInference:
         data_batch = self._get_data_batch_input(
             video=vid_input,
             prompt=prompt,
+            fps=fps,
             camera=camera,
             action=action,
             num_conditional_frames=num_latent_conditional_frames,
@@ -675,6 +693,9 @@ class Video2WorldInference:
                 self.model.text_encoder.model = self.model.text_encoder.model.to("cuda")
             torch.cuda.empty_cache()
 
+        if effective_video_frames < video.shape[2]:
+            video = video[:, :, :effective_video_frames, :, :]
+
         return video
 
     def generate_autoregressive_from_batch(
@@ -687,6 +708,7 @@ class Video2WorldInference:
         guidance: int = 7,
         num_latent_conditional_frames: int = 1,
         resolution: str = "192,320",
+        fps: float = 16.0,
         seed: int = 1,
         negative_prompt: str = _DEFAULT_NEGATIVE_PROMPT,
         camera: torch.Tensor | None = None,
@@ -864,6 +886,7 @@ class Video2WorldInference:
                 num_video_frames=model_required_frames,
                 num_latent_conditional_frames=chunk_num_conditional,
                 resolution=resolution,
+                fps=fps,
                 seed=seed + chunk_idx,
                 negative_prompt=negative_prompt,
                 camera=camera,

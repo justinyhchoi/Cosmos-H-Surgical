@@ -122,7 +122,17 @@ class Interpolator(nn.Module):
 
         self.model = model
         self.model_config = config.model.config
-        self.precision = getattr(config.model, "precision", torch.bfloat16)
+        self.precision = getattr(model, "precision", None)
+        if self.precision is None:
+            precision_name = getattr(config.model, "precision", "bfloat16")
+            if isinstance(precision_name, str):
+                self.precision = {
+                    "float32": torch.float32,
+                    "float16": torch.float16,
+                    "bfloat16": torch.bfloat16,
+                }.get(precision_name, torch.bfloat16)
+            else:
+                self.precision = precision_name
         self.neg_t5_embeddings = None
 
     def _init_distributed(self):

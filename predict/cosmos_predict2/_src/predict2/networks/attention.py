@@ -58,6 +58,7 @@
 # |----------------|-------|
 #
 
+import os
 from functools import partial
 
 import torch
@@ -69,6 +70,11 @@ try:
     FLASH_ATTN_3_AVAILABLE = True
 except ModuleNotFoundError:
     FLASH_ATTN_3_AVAILABLE = False
+
+
+def _should_force_math_sdpa() -> bool:
+    value = os.environ.get("COSMOS_PREDICT2_FORCE_MATH_SDPA", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def get_device_cc(device) -> int:
@@ -98,9 +104,11 @@ def attention(
     q_scale=None,
     causal=False,
     deterministic=False,
-    dtype=torch.bfloat16,
+    dtype=None,
 ):
     supported_dtypes = [torch.bfloat16, torch.float16, torch.float32]
+    if dtype is None:
+        dtype = q.dtype
     is_half = dtype in [torch.bfloat16, torch.float16]
     compute_cap = get_device_cc(q.device)
 
@@ -169,16 +177,30 @@ def attention(
 
 
 
-        with sdpa_kernel_(SDPBackend.MATH):
-            # print(f"Running attention with {sdpa_kernel_.current_backend()} backend.")
-            # print(f"Settings")
-            out = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                is_causal=causal,
-                dropout_p=dropout_p,
-                scale=softmax_scale,
-            )
+        selected_backends = [SDPBackend.MATH] if _should_force_math_sdpa() else SDPA_BACKENDS
+        try:
+            with sdpa_kernel_(selected_backends):
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    is_causal=causal,
+                    dropout_p=dropout_p,
+                    scale=softmax_scale,
+                )
+        except RuntimeError as err:
+            # Some pre-Ampere + build combinations expose SDPA but provide no usable kernel
+            # for the selected backend set. Fall back to MATH as a strict last resort.
+            if "No available kernel" not in str(err):
+                raise
+            with sdpa_kernel_(SDPBackend.MATH):
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    q,
+                    k,
+                    v,
+                    is_causal=causal,
+                    dropout_p=dropout_p,
+                    scale=softmax_scale,
+                )
         out = out.transpose(1, 2).contiguous()
         return out
