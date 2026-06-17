@@ -110,105 +110,123 @@ python -m torch.distributed.launch --nproc_per_node 4 --master_port 9527 train.p
 python -m torch.distributed.launch --nproc_per_node 8 --master_port 9527 train_aux.py --workers 8 --device 0,1,2,3,4,5,6,7 --sync-bn --batch-size 128 --data data/coco.yaml --img 1280 1280 --cfg cfg/training/yolov7-w6.yaml --weights '' --name yolov7-w6 --hyp data/hyp.scratch.p6.yaml
 ```
 
-## CholecTrack20 Detector Training and Evaluation
+## CholecTrack20 YOLOv7-X Detector Pipeline
 
-This fork contains local helpers for training YOLOv7 detectors on the converted CholecTrack20 dataset at `/raid/cholectrack20_yolo` and evaluating them against the CholecTrack20 paper Table 2 detector columns.
+This fork contains the local CholecTrack20 detector pipeline used for the final YOLOv7-X 854px run. The converted YOLO-format dataset lives at `/raid/cholectrack20_yolo`, and the exported checkpoint is:
 
-New files:
+```text
+/raid/justinchoi/YOLO/cholectrack20_train_yolov7x_854p.pt
+```
+
+The matching training-run checkpoint is:
+
+```text
+runs/train/cholectrack20_yolov7x_coco_854/weights/best.pt
+```
+
+Current local files:
 
 | File | Purpose |
 | :-- | :-- |
 | [`data/cholectrack20.yaml`](data/cholectrack20.yaml) | Dataset config for the converted CholecTrack20 YOLO labels. |
-| [`data/hyp.surgitrack.yaml`](data/hyp.surgitrack.yaml) | Hyperparameters aligned with SurgiTrack where YOLOv7 supports them: Adam, `lr0=3e-4`, `weight_decay=1e-5`. |
-| [`train_cholectrack_e6e.sh`](train_cholectrack_e6e.sh) | 4xV100 DDP launcher for COCO-pretrained YOLOv7-E6E using `train_aux.py`. |
-| [`data/cholectrack20_table2_eval.py`](data/cholectrack20_table2_eval.py) | COCOeval-based AP report with AP50, AP75, AP50:95, per-tool AP, and visual-challenge AP. |
-| [`data/cholectrack20_eval_pipeline.sh`](data/cholectrack20_eval_pipeline.sh) | Legacy DetEval-style prediction/evaluation pipeline. Prefer `cholectrack20_table2_eval.py` for Table 2 detector metrics. |
-| [`MODEL_CARD.md`](MODEL_CARD.md) | Model card for the local CholecTrack20 YOLOv7 checkpoints and known limitations. |
+| [`data/cholectrack20_prepare_v2.py`](data/cholectrack20_prepare_v2.py) | Converts CholecTrack20 JSON boxes to YOLO center-format labels and creates train/val/test image lists. |
+| [`data/cholectrack20_table2_eval.py`](data/cholectrack20_table2_eval.py) | COCOeval-based Table 2-style AP report with AP50, AP75, AP50:95, per-tool AP, and visual-challenge AP. |
+| [`data/cholectrack20_tracking_convert.py`](data/cholectrack20_tracking_convert.py) | Optional temporal sample conversion for tracking/context experiments. |
+| [`data/cholectrack20_inspect.py`](data/cholectrack20_inspect.py) | Utility for inspecting generated tracking sample JSON files. |
+| [`MODEL_CARD.md`](MODEL_CARD.md) | Model card for the final YOLOv7-X CholecTrack20 checkpoint, commands, metrics, and limitations. |
 
 The dataset config expects:
 
 ```text
 /raid/cholectrack20_yolo/train.txt
 /raid/cholectrack20_yolo/val.txt
-/raid/cholectrack20_yolo/images/{train,val}/...
-/raid/cholectrack20_yolo/labels/{train,val}/...
+/raid/cholectrack20_yolo/test.txt
+/raid/cholectrack20_yolo/images/{train,val,test}/...
+/raid/cholectrack20_yolo/labels/{train,val,test}/...
 ```
 
-Single GPU YOLOv7 baseline:
+Prepare or refresh the YOLO-format dataset:
 
 ``` shell
-python train.py \
-    --workers 8 \
-    --device 0 \
-    --batch-size 16 \
+python data/cholectrack20_prepare_v2.py \
+    --dataset_root /raid/cholectrack20 \
+    --out_root /raid/cholectrack20_yolo
+```
+
+If the labels were regenerated, remove stale YOLO caches before training:
+
+``` shell
+rm -f /raid/cholectrack20_yolo/train.cache /raid/cholectrack20_yolo/val.cache
+```
+
+Final 4-GPU YOLOv7-X training command:
+
+``` shell
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+NCCL_DEBUG=INFO \
+TORCH_DISTRIBUTED_DEBUG=DETAIL \
+python -m torch.distributed.run \
+    --standalone --nnodes=1 --nproc-per-node=4 \
+    train.py \
     --data data/cholectrack20.yaml \
-    --img 640 640 \
-    --cfg cfg/training/yolov7.yaml \
-    --weights yolov7.pt \
-    --name cholectrack20_yolov7 \
-    --hyp data/hyp.scratch.p5.yaml
-```
-
-Single GPU YOLOv7-E6E:
-
-``` shell
-python train_aux.py \
-    --workers 8 \
-    --device 0 \
-    --batch-size 4 \
-    --data data/cholectrack20.yaml \
-    --img 1280 1280 \
-    --cfg cfg/training/yolov7-e6e.yaml \
-    --weights yolov7-e6e.pt \
-    --name cholectrack20_e6e_single_gpu \
-    --hyp data/hyp.surgitrack.yaml \
-    --epochs 132 \
-    --adam \
-    --iou-thres 0.3
-```
-
-Multiple GPU YOLOv7-E6E on DGX2 4xV100:
-
-``` shell
-bash train_cholectrack_e6e.sh
-```
-
-The launcher uses `torch.distributed.run`, `train_aux.py`, `--sync-bn`, Adam, `lr0=3e-4`, `weight_decay=1e-5`, 132 epochs, and validation NMS IoU `0.3`. To resume the most recent matching run:
-
-``` shell
-bash train_cholectrack_e6e.sh --resume
-```
-
-For PyTorch 2.x compatibility, this workspace patches legacy `torch.load()` calls with `weights_only=False`, reads `LOCAL_RANK` from the environment for `torch.distributed.run`, and fixes multi-GPU loss tensor device placement in `utils/loss.py`.
-
-Table 2-style evaluation:
-
-``` shell
-python data/cholectrack20_table2_eval.py \
-    --weights runs/train/cholectrack20_yolov7_full/weights/best.pt \
-    --data data/cholectrack20.yaml \
-    --split val \
-    --img-size 640 \
+    --cfg cfg/training/yolov7x.yaml \
+    --weights yolov7x.pt \
+    --img-size 854 854 \
     --batch-size 32 \
+    --epochs 100 \
+    --name cholectrack20_yolov7x_coco_854 \
+    --hyp data/hyp.scratch.p5.yaml \
+    --workers 8 \
+    --sync-bn
+```
+
+`854` is rounded by YOLOv7 to the nearest valid stride multiple, so the effective training image size is `864 x 864`. The total batch size is `32`, or `8` images per GPU on 4 GPUs.
+
+Table 2-style test evaluation:
+
+``` shell
+export YOLOV7X_CHOLECTRACK20_WEIGHTS=/raid/justinchoi/YOLO/cholectrack20_train_yolov7x_854p.pt
+
+CUDA_VISIBLE_DEVICES=0 \
+python data/cholectrack20_table2_eval.py \
+    --weights "$YOLOV7X_CHOLECTRACK20_WEIGHTS" \
+    --data data/cholectrack20.yaml \
+    --split test \
+    --img-size 854 \
+    --batch-size 16 \
     --device 0 \
-    --name cholectrack20_table2_yolov7_full
+    --name cholectrack20_table2_yolov7x_coco_854
 ```
 
 The evaluator writes:
 
 ```text
-runs/test/cholectrack20_table2_yolov7_full/predictions.json
-runs/test/cholectrack20_table2_yolov7_full/table2_metrics.csv
-runs/test/cholectrack20_table2_yolov7_full/table2_metrics.json
+runs/test/cholectrack20_table2_yolov7x_coco_854/predictions.json
+runs/test/cholectrack20_table2_yolov7x_coco_854/table2_metrics.csv
+runs/test/cholectrack20_table2_yolov7x_coco_854/table2_metrics.json
 ```
 
-Latest local validation result for `runs/train/cholectrack20_yolov7_full/weights/best.pt`:
+Latest local Table 2-style test result for the YOLOv7-X 854 checkpoint:
 
 | Split | AP50 | AP75 | AP50:95 | Notes |
 | :-- | --: | --: | --: | :-- |
-| Validation | 44.6 | 34.3 | 29.6 | COCOeval via `cholectrack20_table2_eval.py`; this is not the official CholecTrack20 test split. |
+| Test | 83.4 | 62.8 | 56.5 | COCOeval via `cholectrack20_table2_eval.py`; local Table 2-style evaluation, not an official benchmark submission. |
 
-The CholecTrack20 paper reports YOLOv7 AP50 `80.6`, AP75 `62.0`, and AP50:95 `56.1`. The local checkpoints are far below that target and should not be treated as reproduced paper numbers.
+Single-GPU inference:
+
+``` shell
+CUDA_VISIBLE_DEVICES=0 \
+python detect.py \
+    --weights "$YOLOV7X_CHOLECTRACK20_WEIGHTS" \
+    --source /raid/cholectrack20_yolo/images/test \
+    --img-size 854 \
+    --conf-thres 0.25 \
+    --iou-thres 0.45 \
+    --device 0 \
+    --name cholectrack20_yolov7x_854_infer
+```
+
+The CholecTrack20 paper reports YOLOv7 AP50 `80.6`, AP75 `62.0`, and AP50:95 `56.1`. The local YOLOv7-X checkpoint reaches AP50 `83.4`, AP75 `62.8`, and AP50:95 `56.5` in the local Table 2-style test evaluation, but it should not be described as an official reproduction unless the full evaluation protocol and split construction are independently verified.
 
 ## Transfer learning
 

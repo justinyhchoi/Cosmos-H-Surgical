@@ -7,14 +7,11 @@ This model card documents the local YOLOv7-X detector checkpoint trained in this
 ```text
 yolov7/runs/train/cholectrack20_yolov7x_coco_854/weights/best.pt
 ```
-
+OR
+```text
+/raid/justinchoi/YOLO/cholectrack20_train_yolov7x_854p.pt
+```
 The checkpoint is a YOLOv7-X detector fine-tuned from the COCO-pretrained `yolov7x.pt` checkpoint on the converted CholecTrack20 YOLO-format dataset at `/raid/cholectrack20_yolo`.
-
-## Intended Use
-
-The model is intended for research experiments on surgical tool detection in CholecTrack20 frames. It can be used as a detector baseline for downstream tracking experiments, error analysis, and training-pipeline debugging.
-
-It is not intended for clinical deployment, surgical decision support, or patient-facing use.
 
 ## Dataset
 
@@ -23,7 +20,7 @@ It is not intended for clinical deployment, surgical decision support, or patien
 - Local YOLO-format dataset: `/raid/cholectrack20_yolo`
 - Dataset config: `data/cholectrack20.yaml`
 - Classes: `grasper`, `bipolar`, `hook`, `scissors`, `clipper`, `irrigator`, `specimen-bag`
-- Table 2-style evaluation set used here: 13,367 images and 26,475 labeled tool boxes
+- Table 2-style evaluation split used here: CholecTrack20 test split, 13,367 images and 26,475 labeled tool boxes
 
 The YOLO-format dataset was prepared with `data/cholectrack20_prepare_v2.py`, which converts normalized CholecTrack20 top-left boxes `[x, y, w, h]` into YOLO center-format labels `[class, cx, cy, w, h]`.
 
@@ -118,11 +115,79 @@ runs/test/cholectrack20_table2_yolov7x_coco_854/table2_metrics.csv
 runs/test/cholectrack20_table2_yolov7x_coco_854/table2_metrics.json
 ```
 
+### Validation And Inference Commands
+
+Set the checkpoint path once, then reuse it in the commands below:
+
+```bash
+cd yolov7
+export YOLOV7X_CHOLECTRACK20_WEIGHTS=/raid/justinchoi/YOLO/cholectrack20_train_yolov7x_854p.pt
+```
+
+Single-GPU Table 2-style validation on the CholecTrack20 test split:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python data/cholectrack20_table2_eval.py \
+  --weights "$YOLOV7X_CHOLECTRACK20_WEIGHTS" \
+  --data data/cholectrack20.yaml \
+  --split test \
+  --img-size 854 \
+  --batch-size 16 \
+  --device 0 \
+  --name cholectrack20_table2_yolov7x_coco_854_single_gpu
+```
+
+CUDA validation with all four GPUs visible. This script still runs the model on `cuda:0`; use this form mainly to keep the environment consistent and increase the batch size only if GPU 0 has enough memory:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python data/cholectrack20_table2_eval.py \
+  --weights "$YOLOV7X_CHOLECTRACK20_WEIGHTS" \
+  --data data/cholectrack20.yaml \
+  --split test \
+  --img-size 854 \
+  --batch-size 32 \
+  --device 0 \
+  --name cholectrack20_table2_yolov7x_coco_854_cuda0_batch32
+```
+
+Single-GPU inference on a finite image directory, image file, or video file:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+python detect.py \
+  --weights "$YOLOV7X_CHOLECTRACK20_WEIGHTS" \
+  --source /raid/cholectrack20_yolo/images/test \
+  --img-size 854 \
+  --conf-thres 0.25 \
+  --iou-thres 0.45 \
+  --device 0 \
+  --name cholectrack20_yolov7x_854_single_gpu_infer
+```
+
+Multi-GPU parallel inference on a finite image directory or video file:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+python detect_parallel.py \
+  --weights "$YOLOV7X_CHOLECTRACK20_WEIGHTS" \
+  --source /raid/cholectrack20_yolo/images/test \
+  --gpus 0,1,2,3 \
+  --img-size 854 \
+  --conf-thres 0.25 \
+  --iou-thres 0.45 \
+  --name cholectrack20_yolov7x_854_4gpu_infer \
+  --no-half
+```
+
+Use `--source /path/to/image_or_video_or_directory` to run inference on other finite sources. Live streams and webcams should use `detect.py`; `detect_parallel.py` is intended for finite image/video workloads.
+
 ### Overall Metrics
 
 | Split | Images | Labels | AP50 | AP75 | AP50:95 |
 | :-- | --: | --: | --: | --: | --: |
-| CholecTrack20 Table 2-style eval | 13,367 | 26,475 | 83.4 | 62.8 | 56.5 |
+| CholecTrack20 test split, Table 2-style eval | 13,367 | 26,475 | 83.4 | 62.8 | 56.5 |
 
 ### Per-Class Metrics
 
@@ -148,29 +213,3 @@ runs/test/cholectrack20_table2_yolov7x_coco_854/table2_metrics.json
 | Reflection | 34 | 52 | 64.3 | 45.7 | 40.4 |
 | Foul Lens | 615 | 1,495 | 77.0 | 55.7 | 49.6 |
 | Trocar | 334 | 682 | 53.2 | 37.8 | 35.0 |
-
-## Comparison To Published CholecTrack20 Detector Benchmarks
-
-The CholecTrack20 paper reports the following YOLO detector benchmark values in Table 2:
-
-| Model | AP50 | AP75 | AP50:95 | FPS |
-| :-- | --: | --: | --: | --: |
-| YOLOv7 | 80.6 | 62.0 | 56.1 | 20.6 |
-| YOLOv8 | 79.1 | 62.4 | 55.6 | 29.0 |
-| YOLOv9 | 80.2 | 62.6 | 56.5 | 23.7 |
-| YOLOv10 | 80.1 | 62.1 | 55.8 | 28.6 |
-| Local YOLOv7-X | 83.4 | 62.8 | 56.5 | Not measured |
-
-The local YOLOv7-X checkpoint matches or exceeds the published AP values in this local Table 2-style evaluation, but it should not be described as an official benchmark reproduction unless the evaluation protocol, split construction, preprocessing, and reporting environment are independently verified.
-
-## Known Gaps
-
-- FPS was not measured for the final YOLOv7-X checkpoint.
-- The evaluation script computes Table 2-style detector metrics but is not an official CholecTrack20 benchmark submission.
-- The local evaluation depends on the converted YOLO dataset and generated COCO-style eval files in this workspace.
-- The final model uses COCO-pretrained `yolov7x.pt`, while SurgiTrack states its YOLOv7 detector was pretrained on MOT20 and CrowdHuman before CholecTrack20 fine-tuning.
-- YOLOv7-X has a larger compute and memory footprint than the earlier YOLOv7 p5 baseline.
-
-## Licenses And Data Use
-
-Follow the licenses for YOLOv7, CholecTrack20, Cosmos-H-Surgical, and any checkpoint weights used. CholecTrack20 is a research dataset with non-clinical-use constraints; verify the dataset license before redistributing trained weights or predictions.
