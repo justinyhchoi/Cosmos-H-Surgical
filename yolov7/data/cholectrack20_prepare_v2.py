@@ -2,7 +2,8 @@
 """
 Convert CholecTrack20 dataset to YOLOv7 format (v2 - proper structure).
 
-Annotation bbox in CholecTrack20 JSON: [x_norm, y_norm, w_norm, h_norm] (top-left corner format, COCO style)
+Annotation bbox in CholecTrack20 JSON: [x, y, w, h] (top-left corner format, COCO style).
+The local release stores normalized values, while the README example shows pixel values.
 YOLOv7 label format: <class> <x_center_norm> <y_center_norm> <w_norm> <h_norm>
 
 Output structure:
@@ -26,6 +27,99 @@ CLASSES = ['grasper', 'bipolar', 'hook', 'scissors', 'clipper', 'irrigator', 'sp
 INSTRUMENT_ID_TO_CLASS = {i: i for i in range(7)}
 
 
+def annotation_json_path(dataset_root, split_name, vid, out_root):
+    override_path = Path(out_root) / 'overrides' / split_name / vid / f'{vid}.json'
+    if override_path.exists():
+        return override_path
+    return Path(dataset_root) / split_name / vid / f'{vid}.json'
+
+
+def yolo_split_name(split_name):
+    return {'Training': 'train', 'Validation': 'val', 'Testing': 'test'}[split_name]
+
+
+def extracted_frames_dir(out_root, split_name, vid):
+    return Path(out_root) / 'extracted_frames' / yolo_split_name(split_name) / vid
+
+
+def normalize_bbox(bbox, image_width, image_height):
+    """Return [x, y, w, h] normalized to image size.
+
+    CholecTrack20 annotations in the local copy are already normalized, but the
+    public README uses pixel-valued examples. Pixel boxes are much larger than 1,
+    while normalized boxes may slightly exceed [0, 1] at image boundaries.
+    """
+    x, y, w, h = bbox
+    if max(abs(x), abs(y), abs(w), abs(h)) > 2.0:
+        x /= image_width
+        y /= image_height
+        w /= image_width
+        h /= image_height
+    return x, y, w, h
+
+
+def extract_annotated_frames(vid_dir, json_file, frames_dir):
+    """Extract annotated frames from a split MP4 and resize to annotation size."""
+    try:
+        import cv2
+    except Exception as exc:
+        print(f"  WARNING: OpenCV unavailable, skipping frame extraction: {exc}")
+        return False
+
+    def needs_extraction(frame_path, width, height):
+        if not frame_path.exists():
+            return True
+        image = cv2.imread(str(frame_path))
+        return image is None or image.shape[1] != width or image.shape[0] != height
+
+    mp4_files = list(Path(vid_dir).glob('*.mp4'))
+    if not mp4_files:
+        return False
+
+    data = json.load(open(json_file))
+    ann_frame_ids = set(int(k) for k in data['annotations'].keys())
+    image_width = data['video']['width']
+    image_height = data['video']['height']
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    missing_or_bad = [
+        fid for fid in sorted(ann_frame_ids)
+        if needs_extraction(frames_dir / f'{fid:06d}.png', image_width, image_height)
+    ]
+    if not missing_or_bad:
+        print(f"  {Path(vid_dir).name}: annotated frames already extracted ({len(ann_frame_ids)} frames)")
+        return True
+
+    print(f"  Extracting {Path(vid_dir).name}: {len(missing_or_bad)} missing or wrong-size annotated frames...")
+    capture = cv2.VideoCapture(str(mp4_files[0]))
+    if not capture.isOpened():
+        print(f"    ERROR: Could not open {mp4_files[0]}")
+        return False
+
+    target_frames = set(missing_or_bad)
+    last_target_frame = max(target_frames)
+    saved = 0
+    failed = 0
+    frame_index = 0
+    while frame_index < last_target_frame:
+        ok, frame = capture.read()
+        frame_index += 1
+        if frame_index not in target_frames:
+            continue
+        if not ok or frame is None:
+            failed += 1
+            continue
+        if frame.shape[1] != image_width or frame.shape[0] != image_height:
+            frame = cv2.resize(frame, (image_width, image_height), interpolation=cv2.INTER_AREA)
+        if cv2.imwrite(str(frames_dir / f'{frame_index:06d}.png'), frame):
+            saved += 1
+        else:
+            failed += 1
+    capture.release()
+    print(f"    Saved {saved}/{len(missing_or_bad)} frames" + (f", failed {failed}" if failed else ""))
+    return failed == 0
+
+
 def convert_split(dataset_root, split_name, out_root):
     """Convert one split (Training/Validation/Testing) to YOLO format with proper directory structure."""
     split_dir = Path(dataset_root) / split_name
@@ -35,35 +129,44 @@ def convert_split(dataset_root, split_name, out_root):
         if not vid_dir.is_dir() or not vid_dir.name.startswith('VID'):
             continue
         vid = vid_dir.name
-        json_files = list(vid_dir.glob('*.json'))
-        if not json_files:
+        if (split_name, vid) in EXCLUDED_VIDEOS:
+            print(f"  Skipping excluded video {split_name}/{vid}")
+            continue
+        json_file = annotation_json_path(dataset_root, split_name, vid, out_root)
+        if not json_file.exists():
             print(f"  WARNING: No JSON found in {vid_dir}")
             continue
-        json_file = json_files[0]
 
         data = json.load(open(json_file))
         annotations = data['annotations']  # dict: frame_id_str -> list of tool dicts
+        image_width = data['video']['width']
+        image_height = data['video']['height']
 
         # Source image directory
         if split_name == 'Testing':
-            src_img_dir = Path(out_root) / 'test_frames' / vid
+            src_img_dir = extracted_frames_dir(out_root, split_name, vid)
         else:
             src_img_dir = vid_dir / 'Frames'
+            if not src_img_dir.exists() and list(vid_dir.glob('*.mp4')):
+                src_img_dir = extracted_frames_dir(out_root, split_name, vid)
+                extract_annotated_frames(vid_dir, json_file, src_img_dir)
 
         # Output directories
-        out_img_dir = Path(out_root) / 'images' / split_name.lower() / vid
-        out_label_dir = Path(out_root) / 'labels' / split_name.lower() / vid
+        yolo_split = yolo_split_name(split_name)
+        out_img_dir = Path(out_root) / 'images' / yolo_split / vid
+        out_label_dir = Path(out_root) / 'labels' / yolo_split / vid
         out_img_dir.mkdir(parents=True, exist_ok=True)
         out_label_dir.mkdir(parents=True, exist_ok=True)
 
-        frame_files = sorted(src_img_dir.glob('*.png')) if src_img_dir.exists() else []
-        if not frame_files:
+        if not src_img_dir.exists():
             print(f"  WARNING: No frames found in {src_img_dir}")
             continue
 
-        for src_img_path in frame_files:
-            frame_stem = src_img_path.stem
-            frame_id_str = str(int(frame_stem))  # strip leading zeros
+        for frame_id_str in sorted(annotations.keys(), key=lambda x: int(x)):
+            frame_stem = f"{int(frame_id_str):06d}"
+            src_img_path = src_img_dir / f"{frame_stem}.png"
+            if not src_img_path.exists():
+                continue
             tools = annotations.get(frame_id_str, [])
 
             # Output paths
@@ -83,12 +186,12 @@ def convert_split(dataset_root, split_name, out_root):
             # Write labels
             label_lines = []
             for tool in tools:
-                bbox = tool['tool_bbox']   # [x_norm, y_norm, w_norm, h_norm] (top-left corner, COCO)
+                bbox = tool['tool_bbox']   # [x, y, w, h] (top-left corner, COCO)
                 cat_id = tool['instrument']
                 if cat_id not in INSTRUMENT_ID_TO_CLASS:
                     continue
                 cls = INSTRUMENT_ID_TO_CLASS[cat_id]
-                x1, y1, w, h = bbox
+                x1, y1, w, h = normalize_bbox(bbox, image_width, image_height)
                 # Convert to YOLO center format
                 cx = x1 + w / 2.0
                 cy = y1 + h / 2.0
@@ -102,64 +205,23 @@ def convert_split(dataset_root, split_name, out_root):
             with open(label_file, 'w') as f:
                 f.write('\n'.join(label_lines))
 
-            img_list_lines.append(str(out_img_path.resolve()))
+            img_list_lines.append(str(out_img_path))
 
     return img_list_lines
 
 
 def extract_test_frames(dataset_root, out_root):
-    """Extract frames from test set MP4s at 25fps, save only annotated frames."""
-    try:
-        import subprocess
-    except:
-        print("  WARNING: subprocess not available, skipping test frame extraction")
-        return
-    
+    """Extract only annotated test frames and resize to the annotation size."""
     split_dir = Path(dataset_root) / 'Testing'
     for vid_dir in sorted(split_dir.iterdir()):
         if not vid_dir.is_dir() or not vid_dir.name.startswith('VID'):
             continue
         vid = vid_dir.name
-        mp4_files = list(vid_dir.glob('*.mp4'))
         json_files = list(vid_dir.glob('*.json'))
-        if not mp4_files or not json_files:
+        if not json_files:
             print(f"  WARNING: Missing MP4 or JSON in {vid_dir}")
             continue
-        
-        mp4 = mp4_files[0]
-        data = json.load(open(json_files[0]))
-        ann_frame_ids = set(int(k) for k in data['annotations'].keys())
-
-        frames_dir = Path(out_root) / 'test_frames' / vid
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Check if already extracted
-        existing = set(int(f.stem) for f in frames_dir.glob('*.png'))
-        if existing >= ann_frame_ids:
-            print(f"  {vid}: frames already extracted ({len(existing)} frames)")
-            continue
-
-        print(f"  Extracting {vid} frames at 25fps (keeping {len(ann_frame_ids)} annotated frames)...")
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cmd = [
-                'ffmpeg', '-y', '-i', str(mp4),
-                '-vf', 'fps=25',
-                os.path.join(tmpdir, '%06d.png'),
-                '-loglevel', 'error'
-            ]
-            try:
-                subprocess.run(cmd, check=True)
-                # ffmpeg names frames starting at 000001 = 25fps frame 1
-                for fid in sorted(ann_frame_ids):
-                    src = os.path.join(tmpdir, f'{fid:06d}.png')
-                    dst = frames_dir / f'{fid:06d}.png'
-                    if os.path.exists(src):
-                        shutil.copy2(src, dst)
-                n = len(list(frames_dir.glob('*.png')))
-                print(f"    Saved {n}/{len(ann_frame_ids)} annotated frames")
-            except Exception as e:
-                print(f"    ERROR: {e}")
+        extract_annotated_frames(vid_dir, json_files[0], extracted_frames_dir(out_root, 'Testing', vid))
 
 
 def main():

@@ -36,6 +36,23 @@ CONDITIONS = {
     'Trocar': 'undercoverage',
 }
 
+def annotation_json_path(dataset_root, raw_root, raw_split, video_id):
+    override_path = Path(dataset_root) / 'overrides' / raw_split / video_id / f'{video_id}.json'
+    if override_path.exists():
+        return override_path
+    return Path(raw_root) / raw_split / video_id / f'{video_id}.json'
+
+
+def normalize_bbox(bbox, image_width, image_height):
+    """Return [x, y, w, h] normalized to image size."""
+    x, y, box_w, box_h = bbox
+    if max(abs(x), abs(y), abs(box_w), abs(box_h)) > 2.0:
+        x /= image_width
+        y /= image_height
+        box_w /= image_width
+        box_h /= image_height
+    return x, y, box_w, box_h
+
 
 def load_yaml(path):
     with open(path) as file:
@@ -57,8 +74,13 @@ def build_coco_gt(dataset_root, raw_root, split, image_files):
     ann_id = 1
     image_id = 1
 
-    for json_path in sorted((Path(raw_root) / raw_split).glob('*/*.json')):
-        video_id = json_path.parent.name
+    for video_dir in sorted((Path(raw_root) / raw_split).glob('VID*')):
+        video_id = video_dir.name
+        if (raw_split, video_id) in EXCLUDED_VIDEOS:
+            continue
+        json_path = annotation_json_path(dataset_root, raw_root, raw_split, video_id)
+        if not json_path.exists():
+            continue
         with open(json_path) as file:
             video_data = json.load(file)
         width = video_data['video']['width']
@@ -78,7 +100,7 @@ def build_coco_gt(dataset_root, raw_root, split, image_files):
                 'frame_id': int(frame_text),
             })
             for ann in frame_annotations:
-                x, y, box_w, box_h = ann['tool_bbox']
+                x, y, box_w, box_h = normalize_bbox(ann['tool_bbox'], width, height)
                 coco_ann = {
                     'id': ann_id,
                     'image_id': image_id,

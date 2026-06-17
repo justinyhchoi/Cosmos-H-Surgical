@@ -66,16 +66,45 @@ else:
 
     _ROTARY_FALLBACK_WARNED = False
 
-    def apply_rotary_pos_emb(tensor, *args, **kwargs):
+    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+        x_pair = x.reshape(*x.shape[:-1], -1, 2)
+        x1 = x_pair[..., 0]
+        x2 = x_pair[..., 1]
+        return torch.stack((-x2, x1), dim=-1).flatten(-2)
+
+    def apply_rotary_pos_emb(tensor, freqs, tensor_format="bshd", fused=True, **kwargs):
         global _ROTARY_FALLBACK_WARNED
         if not _ROTARY_FALLBACK_WARNED:
             warnings.warn(
-                "transformer_engine is unavailable; disabling fused RoPE in minimal_v4_dit fallback mode.",
+                "transformer_engine is unavailable; using torch RoPE fallback in minimal_v4_dit.",
                 RuntimeWarning,
                 stacklevel=2,
             )
             _ROTARY_FALLBACK_WARNED = True
-        return tensor
+
+        if tensor_format != "bshd":
+            raise NotImplementedError(f"RoPE fallback only supports tensor_format='bshd', got {tensor_format!r}")
+
+        if freqs is None:
+            return tensor
+
+        if freqs.ndim == 4:
+            theta = freqs[:, 0, 0, :]
+        elif freqs.ndim == 2:
+            theta = freqs
+        else:
+            raise ValueError(f"Unexpected RoPE frequency shape: {tuple(freqs.shape)}")
+
+        seq_len = tensor.shape[1]
+        if theta.shape[0] < seq_len:
+            raise ValueError(f"RoPE frequencies length {theta.shape[0]} is shorter than sequence length {seq_len}")
+        theta = theta[:seq_len].to(device=tensor.device, dtype=torch.float32)
+
+        x = tensor.to(torch.float32)
+        cos = theta.cos().unsqueeze(0).unsqueeze(2)
+        sin = theta.sin().unsqueeze(0).unsqueeze(2)
+        out = x * cos + _rotate_half(x) * sin
+        return out.to(dtype=tensor.dtype)
 
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
